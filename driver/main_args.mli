@@ -25,6 +25,7 @@ module type Bytecomp_options =
     val _custom : unit -> unit
     val _dllib : string -> unit
     val _dllpath : string -> unit
+    val _easytype : unit -> unit
     val _g : unit -> unit
     val _i : unit -> unit
     val _I : string -> unit
@@ -79,6 +80,7 @@ module type Bytecomp_options =
 
 module type Bytetop_options = sig
   val _absname : unit -> unit
+  val _easytype : unit -> unit
   val _I : string -> unit
   val _init : string -> unit
   val _labels : unit -> unit
@@ -124,6 +126,7 @@ module type Optcomp_options = sig
   val _ccopt : string -> unit
   val _compact : unit -> unit
   val _config : unit -> unit
+  val _easytype : unit -> unit
   val _for_pack : string -> unit
   val _g : unit -> unit
   val _i : unit -> unit
@@ -193,6 +196,7 @@ end;;
 module type Opttop_options = sig
   val _absname : unit -> unit
   val _compact : unit -> unit
+  val _easytype : unit -> unit
   val _I : string -> unit
   val _init : string -> unit
   val _inline : int -> unit

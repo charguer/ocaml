@@ -88,3 +88,4 @@ val dlcode : bool ref
 val runtime_variant : string ref
 val force_slash : bool ref
 val keep_locs : bool ref
+val easytype : bool ref

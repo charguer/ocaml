@@ -105,3 +105,5 @@ let dlcode = ref true (* not -nodynlink *)
 let runtime_variant = ref "";;      (* -runtime-variant *)
 
 let keep_locs = ref false              (* -keep-locs *)
+
+let easytype = ref false              (* -easytype *)
