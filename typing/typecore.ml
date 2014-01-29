@@ -128,7 +128,7 @@ let format_fprintf_list ppf sep print_item items =
   let rec aux = function
     | [] -> ()
     | [x] -> print_item ppf x
-    | x::ls -> print_item ppf x; Format.fprintf ppf "%s" sep; aux ls
+    | x::ls -> print_item ppf x; sep ppf; aux ls
     in
   aux items
 
@@ -139,7 +139,7 @@ let plural ls =
 
 (* Helper for printing type *)
 let format_type ppf ty =
-  Format.fprintf ppf "[%a]" Printtyp.type_expr ty
+  Format.fprintf ppf "@[[%a]@]" Printtyp.type_expr ty
 
 (* Helper for decomposing an arrow type; returns list of argument types, and return type *)
 
@@ -2089,7 +2089,7 @@ and type_expect_ ?in_function env sexp ty_expected =
         type_let env rec_flag spat_sexp_list scp true in
       let body =
         type_expect_easify new_env (wrap_unpacks sbody unpacks) ty_expected
-          (easy_report_but "the body of this let-expression is required by the context to have type") in
+          (easy_report_but_string "the body of this let-expression is required by the context to have type") in
       re {
         exp_desc = Texp_let(rec_flag, pat_exp_list, body);
         exp_loc = loc; exp_extra = [];
@@ -2126,7 +2126,7 @@ and type_expect_ ?in_function env sexp ty_expected =
              [Vb.mk spat smatch] sexp)
       in
       type_expect_easify ?in_function env sfun ty_expected
-        (easy_report_but "the body of this function is required by the context to have type")
+        (easy_report_but_string "the body of this function is required by the context to have type")
 
         (* TODO: keep attributes, call type_function directly *)
   | Pexp_fun (l, None, spat, sexp) ->
@@ -2184,15 +2184,24 @@ and type_expect_ ?in_function env sexp ty_expected =
             let show_func_name ppf () = 
               match sfunct.pexp_desc with
               | Pexp_ident lid -> 
-                  Format.fprintf ppf " ";
-                  format_fprintf_list ppf "." (fun pff s -> Format.fprintf ppf "%s" s) (Longident.flatten lid.txt)
+                  Format.fprintf ppf " `";
+                  format_fprintf_list ppf (fun ppf -> Format.fprintf ppf ".") (fun pff s -> Format.fprintf ppf "%s" s) (Longident.flatten lid.txt);
+                  Format.fprintf ppf "'";
               | _ -> ()
               in
-            Format.fprintf ppf "The function\"%a\" expects %d argument%s of type%s\n" show_func_name ()  (List.length expected_tys) (plural expected_tys) (plural expected_tys);
-            format_fprintf_list ppf " and " format_type expected_tys;
-            Format.fprintf ppf ",\nbut it was provided %d argument%s of type%s\n" (List.length tys) (plural tys) (plural tys);
-            format_fprintf_list ppf " and " format_type tys;
-            Format.fprintf ppf ".\n\n" 
+            let show_count ls =
+              let nb = List.length ls in
+              if nb = 1 then "an" else string_of_int nb
+              in
+            if expected_tys = [] then begin
+              Format.fprintf ppf "@[The expression%a has type %a,@, so it is not a function" show_func_name ()  format_type funct_sch;
+            end else begin
+              Format.fprintf ppf "@[The function%a expects %s argument%s of type%s @," show_func_name ()  (show_count expected_tys) (plural expected_tys) (plural expected_tys);
+              format_fprintf_list ppf (fun ppf -> Format.fprintf ppf "@, and ") format_type expected_tys;
+            end;
+            Format.fprintf ppf ", @,but it is given %s argument%s of type%s @," (show_count tys) (plural tys) (plural tys);
+            format_fprintf_list ppf (fun ppf -> Format.fprintf ppf "@, and ") format_type tys;
+            Format.fprintf ppf ".@.@]";
             in
           raise (Error ((*loc*) funct.exp_loc, env, Apply_error_easy (explain, loc', err')))
         end in
@@ -2205,7 +2214,7 @@ and type_expect_ ?in_function env sexp ty_expected =
         exp_attributes = sexp.pexp_attributes;
         exp_env = env } in
       unify_exp_easy env (re exp) (instance env ty_expected) 
-        (easy_report_but "the result of the function application is required by the context to have type")
+        (easy_report_but_string "the result of the function application is required by the context to have type")
   | Pexp_apply(sfunct, sargs) ->
       begin_def (); (* one more level for non-returning functions *)
       if !Clflags.principal then begin_def ();
@@ -2453,11 +2462,11 @@ and type_expect_ ?in_function env sexp ty_expected =
         exp_env = env }
   | Pexp_ifthenelse(scond, sifso, sifnot) ->
       let cond = type_expect_easify env scond Predef.type_bool 
-         (easy_report_so_but "this expression is the condition of a if-statement") in
+         (easy_report_so_but_string "this expression is the condition of a if-statement") in
       begin match sifnot with
         None ->
           let ifso = type_expect_easify env sifso Predef.type_unit 
-            (easy_report_so_but "this expression is the result of a conditional with no else branch") in
+            (easy_report_so_but_string "this expression is the result of a conditional with no else branch") in
           rue {
             exp_desc = Texp_ifthenelse(cond, ifso, None);
             exp_loc = loc; exp_extra = [];
@@ -2480,8 +2489,8 @@ and type_expect_ ?in_function env sexp ty_expected =
           let _ = unify_exp_types_easy loc env ifso.exp_type ifnot.exp_type
              (fun ppf (m1,m2,m3,m4) ->
                 Format.fprintf ppf
-                  "@[<v>The then-branch has type %a whereas the else-branch has type %a.@  \
-                    @[%s@ [%a]@ %s@ [%a].@;\
+                  "@[<v>The then-branch has type %a@, but the else-branch has type@, %a. @,\
+                    @[%s@, [%a] @,%s@, [%a].@,\
                     @]%a\
                     %a
                    @]"
@@ -2490,7 +2499,7 @@ and type_expect_ ?in_function env sexp ty_expected =
                  "Cannot unify type" m1 () "with type" m2 () m3 () m4 ())
             in
           let _ = unify_exp_easy env ifso ty_expected  
-            (easy_report ~swap:true "the branches of the conditional are required by the context to have type" "but they have type") in
+            (easy_report ~swap:true (format_string "the branches of the conditional are required by the context to have type") (format_string "but they have type")) in
           re {
             exp_desc = Texp_ifthenelse(cond, ifso, Some ifnot);
             exp_loc = loc; exp_extra = [];
@@ -2511,7 +2520,7 @@ and type_expect_ ?in_function env sexp ty_expected =
       end
   | Pexp_sequence(sexp1, sexp2) ->
       let exp1 = type_statement_easify env sexp1 
-        (easy_report_so_but "this expression is followed by a semi-column") in
+        (easy_report_so_but_string "this expression is followed by a semi-column") in
       let exp2 = type_expect env sexp2 ty_expected in
       re {
         exp_desc = Texp_sequence(exp1, exp2);
@@ -2521,9 +2530,9 @@ and type_expect_ ?in_function env sexp ty_expected =
         exp_env = env }
   | Pexp_while(scond, sbody) ->
       let cond = type_expect_easify env scond Predef.type_bool 
-        (easy_report_so_but "this expression is the condition of a while loop") in
+        (easy_report_so_but_string "this expression is the condition of a while loop") in
       let body = type_statement_easify env sbody 
-        (easy_report_so_but "this expression is the body of a while loop") in
+        (easy_report_so_but_string "this expression is the body of a while loop") in
       rue {
         exp_desc = Texp_while(cond, body);
         exp_loc = loc; exp_extra = [];
@@ -2532,9 +2541,9 @@ and type_expect_ ?in_function env sexp ty_expected =
         exp_env = env }
   | Pexp_for(param, slow, shigh, dir, sbody) ->
       let low = type_expect_easify env slow Predef.type_int 
-        (easy_report_so_but "this expression is a for-loop start index") in
+        (easy_report_so_but_string "this expression is a for-loop start index") in
       let high = type_expect_easify env shigh Predef.type_int
-        (easy_report_so_but "this expression is a for-loop stop index") in
+        (easy_report_so_but_string "this expression is a for-loop stop index") in
       let id, new_env =
         match param.ppat_desc with
         | Ppat_any -> Ident.create "_for", env
@@ -2547,7 +2556,7 @@ and type_expect_ ?in_function env sexp ty_expected =
             raise (Error (param.ppat_loc, env, Invalid_for_loop_index))
       in
       let body = type_statement_easify new_env sbody 
-        (easy_report_so_but "this expression is the body of a while loop") in
+        (easy_report_so_but_string "this expression is the body of a while loop") in
       rue {
         exp_desc = Texp_for(id, param, low, high, dir, body);
         exp_loc = loc; exp_extra = [];
@@ -2865,7 +2874,7 @@ and type_expect_ ?in_function env sexp ty_expected =
         exp_attributes = sexp.pexp_attributes;
         exp_env = env }
   | Pexp_assert (e) ->
-      let cond = type_expect_easify env e Predef.type_bool (easy_report_so_but "this expression is the condition of an assertion") in
+      let cond = type_expect_easify env e Predef.type_bool (easy_report_so_but_string "this expression is the condition of an assertion") in
       let exp_type =
         match cond.exp_desc with
         | Texp_construct(_, {cstr_name="false"}, _) ->
@@ -3718,23 +3727,37 @@ and type_statement env sexp =
 
 (* helper function for building error messages *)
 
-and easy_report ?(swap=false) (msg1:string) (msg2:string) : easy_reporter =
+and easy_report ?(swap=false) msg1 msg2 : easy_reporter =
   fun ppf (m1,m2,m3,m4) ->
     let (m1,m2) = if swap then (m2,m1) else (m1,m2) in
-    Format.fprintf ppf
+    Format.fprintf ppf (* AC: what are these: @;<1 2>*)
       "@[<v>\
-        @[%s@;<1 2>[%a]@ \
-          %s@;<1 2>[%a].\
-        @]%a\
+        @[%a @,[%a]@ @,\
+          %a @,[%a].\
+        @]%a@,\
         %a
        @]"
-     msg1 m1 () msg2 m2 () m3 () m4 ()
+     msg1 () m1 () msg2 () m2 () m3 () m4 ()
 
-and easy_report_but (msg:string) : easy_reporter = 
-   easy_report ~swap:true msg " but it has type"
+and format_string (s:string) =
+  fun pff () -> Format.fprintf pff "@,%s@," s
 
-and easy_report_so_but (msg:string) : easy_reporter = 
-   easy_report_but (msg ^ ",\nso it should have type") 
+(* AC: needed?
+and format_msg format =
+  fun pff () -> Format.fprintf pff format
+*)
+
+and easy_report_but msg : easy_reporter = 
+  easy_report ~swap:true msg (fun pff () -> Format.fprintf pff "@,but it has type@,")
+
+and easy_report_so_but msg : easy_reporter = 
+  easy_report_but (fun pff () -> Format.fprintf pff "%a,@, so it should have type@," msg ())
+
+and easy_report_so_but_string s : easy_reporter = 
+  easy_report_so_but (format_string s)
+
+and easy_report_but_string s : easy_reporter = 
+  easy_report_but (format_string s)
 
 and type_statement_easify env sexp report =
   if !Clflags.easytype
@@ -3756,7 +3779,7 @@ and type_statement_easy env sexp report =
     | Tarrow (_,tleft,_,_) ->
        begin match (expand_head env tleft).desc with
        | Tconstr (p, _, _) when Path.same p Predef.path_unit ->
-          Some "You probably forgot to provide \"()\" as argument."
+          Some "You probably forgot to provide `()' as argument."
        | Tarrow _ -> Some "You probably forgot several arguments." 
        | _ -> Some "You probably forgot an argument."
        end 
@@ -3942,7 +3965,7 @@ and type_cases ?in_function env ty_arg ty_res partial_flag loc caselist =
                   Some
                     (type_expect_easify ext_env (wrap_unpacks scond unpacks)
                        Predef.type_bool
-                      (easy_report_so_but "this expression is a when-clause condition"))
+                      (easy_report_so_but_string "this expression is a when-clause condition"))
             in
             let exp = type_exp ext_env sexp in
             {
@@ -3957,10 +3980,10 @@ and type_cases ?in_function env ty_arg ty_res partial_flag loc caselist =
           let first_branch = (List.hd cases).c_rhs in
           List.iter (fun c ->
             ignore (unify_exp_easy env c.c_rhs first_branch.exp_type  
-              (easy_report ~swap:true "the previous branches of the matching have type" "but this branch has type"))
+              (easy_report ~swap:true (format_string "the previous branches produce values of type") (format_string "but this branch has type")))
             ) cases;
           ignore (unify_exp_easy env first_branch ty_res  
-            (easy_report ~swap:true "the branches of the matching are required by the context to have type" "but they have type"))
+            (easy_report ~swap:true (format_string "the branches of the matching are required by the context to produce values of type") (format_string "but they have type")))
         end;
         cases
      end
@@ -4269,6 +4292,15 @@ let rec report_error env ppf = function
          @]"
        msg1 m1 () msg2 m2 () m3 () 
    *)
+  | Apply_error_easy (explain, loc, Apply_non_function typ) ->
+      explain ppf;
+      (* Note: some copy-paste from code further below *)
+      reset_and_mark_loops typ;
+      begin match (repr typ).desc with
+        Tarrow _ ->
+          fprintf ppf "@[Maybe you forgot a `;' @]"
+      | _ -> ()
+      end
   | Apply_error_easy (explain, loc, original_error) ->
       explain ppf;
       fprintf ppf "---\n";
@@ -4280,6 +4312,7 @@ let rec report_error env ppf = function
         Tarrow _ ->
           fprintf ppf "@[<v>@[<2>This function has type@ %a@]"
             type_expr typ;
+            (* AC: shouldn't this "@ " be a "@[" ? *)
           fprintf ppf "@ @[It is applied to too many arguments;@ %s@]@]"
                       "maybe you forgot a `;'."
       | _ ->
