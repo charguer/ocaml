@@ -2269,7 +2269,7 @@ and type_expect_ ?in_function env sexp ty_expected =
       if is_nonexpansive arg then generalize arg.exp_type
       else generalize_expansive env arg.exp_type;
       let cases, partial =
-        type_cases env arg.exp_type ty_expected true loc caselist
+        type_cases_easify env arg.exp_type ty_expected true loc caselist
       in
       re {
         exp_desc = Texp_match(arg, cases, partial);
@@ -2280,7 +2280,7 @@ and type_expect_ ?in_function env sexp ty_expected =
   | Pexp_try(sbody, caselist) ->
       let body = type_expect env sbody ty_expected in
       let cases, _ =
-        type_cases env Predef.type_exn ty_expected false loc caselist in
+        type_cases_easify env Predef.type_exn ty_expected false loc caselist in
       re {
         exp_desc = Texp_try(body, cases);
         exp_loc = loc; exp_extra = [];
@@ -2506,7 +2506,7 @@ and type_expect_ ?in_function env sexp ty_expected =
           let _ = unify_exp_types_easy loc env ifso.exp_type ifnot.exp_type
              (fun ppf (m1,m2,m3,m4) ->
                 Format.fprintf ppf
-                  "@[<v>The then-branch has type %a@, but the else-branch has type@, %a. @,\
+                  "@[<v>The then-branch has type %a @,but the else-branch has type @,%a. @,\
                     @[%s@, [%a] @,%s@, [%a].@,\
                     @]%a\
                     %a
@@ -2536,7 +2536,7 @@ and type_expect_ ?in_function env sexp ty_expected =
             exp_env = env }
       end
   | Pexp_sequence(sexp1, sexp2) ->
-      let exp1 = type_statement_easify ~force_easy:true env sexp1 
+      let exp1 = type_statement_easify ~force_easy:!Clflags.easytype env sexp1 
         (easy_report_so_but_string "This expression is followed by a semi-column") in
       let exp2 = type_expect env sexp2 ty_expected in
       re {
@@ -2548,7 +2548,7 @@ and type_expect_ ?in_function env sexp ty_expected =
   | Pexp_while(scond, sbody) ->
       let cond = type_expect_easify env scond Predef.type_bool 
         (easy_report_so_but_string "This expression is the condition of a while loop") in
-      let body = type_statement_easify env sbody 
+      let body = type_statement_easify ~force_easy:!Clflags.easytype env sbody 
         (easy_report_so_but_string "This expression is the body of a while loop") in
       rue {
         exp_desc = Texp_while(cond, body);
@@ -2572,7 +2572,7 @@ and type_expect_ ?in_function env sexp ty_expected =
         | _ ->
             raise (Error (param.ppat_loc, env, Invalid_for_loop_index))
       in
-      let body = type_statement_easify new_env sbody 
+      let body = type_statement_easify ~force_easy:!Clflags.easytype new_env sbody 
         (easy_report_so_but_string "This expression is the body of a while loop") in
       rue {
         exp_desc = Texp_for(id, param, low, high, dir, body);
@@ -3082,7 +3082,7 @@ and type_function ?in_function loc attrs env ty_expected l caselist =
     generalize_structure ty_res
   end;
   let cases, partial =
-    type_cases ~in_function:(loc_fun,ty_fun) env ty_arg ty_res
+    type_cases_easify ~in_function:(loc_fun,ty_fun) env ty_arg ty_res
       true loc caselist in
   let not_function ty =
     let ls, tvar = list_labels env ty in
@@ -3852,6 +3852,11 @@ and type_statement_easify ?(force_easy=false) env sexp report =
     then type_statement_easy env sexp report
     else type_statement env sexp
 
+and type_cases_easify ?in_function env ty_arg ty_res partial_flag loc caselist =
+  if !activate_easytype
+    then type_cases_easy ?in_function env ty_arg ty_res partial_flag loc caselist
+    else type_cases ?in_function env ty_arg ty_res partial_flag loc caselist
+
 and report_adding report msg_add = fun ppf msgs ->
    report ppf msgs;
    Format.fprintf ppf "%s\n" msg_add
@@ -3940,6 +3945,141 @@ and unify_exp_easy env exp expected_ty report =
 (* Typing of match cases *)
 
 and type_cases ?in_function env ty_arg ty_res partial_flag loc caselist =
+  (* ty_arg is _fully_ generalized *)
+  let patterns = List.map (fun {pc_lhs=p} -> p) caselist in
+  let erase_either =
+    List.exists contains_polymorphic_variant patterns
+    && contains_variant_either ty_arg
+  and has_gadts = List.exists (contains_gadt env) patterns in
+(*  prerr_endline ( if has_gadts then "contains gadt" else "no gadt"); *)
+  let ty_arg =
+    if (has_gadts || erase_either) && not !Clflags.principal
+    then correct_levels ty_arg else ty_arg
+  and ty_res, env =
+    if has_gadts && not !Clflags.principal then
+      correct_levels ty_res, duplicate_ident_types loc caselist env
+    else ty_res, env
+  in
+  let lev, env =
+    if has_gadts then begin
+      (* raise level for existentials *)
+      begin_def ();
+      Ident.set_current_time (get_current_level ());
+      let lev = Ident.current_time () in
+      Ctype.init_def (lev+1000);                 (* up to 1000 existentials *)
+      (lev, Env.add_gadt_instance_level lev env)
+    end else (get_current_level (), env)
+  in
+(*  if has_gadts then
+    Format.printf "lev = %d@.%a@." lev Printtyp.raw_type_expr ty_res; *)
+  begin_def (); (* propagation of the argument *)
+  let ty_arg' = newvar () in
+  let pattern_force = ref [] in
+(*  Format.printf "@[%i %i@ %a@]@." lev (get_current_level())
+    Printtyp.raw_type_expr ty_arg; *)
+  let pat_env_list =
+    List.map
+      (fun {pc_lhs; pc_guard; pc_rhs} ->
+        let loc =
+          let open Location in
+          match pc_guard with
+          | None -> pc_rhs.pexp_loc
+          | Some g -> {pc_rhs.pexp_loc with loc_start=g.pexp_loc.loc_start}
+        in
+        if !Clflags.principal then begin_def (); (* propagation of pattern *)
+        let scope = Some (Annot.Idef loc) in
+        let (pat, ext_env, force, unpacks) =
+          let partial =
+            if !Clflags.principal || erase_either
+            then Some false else None in
+          let ty_arg = instance ?partial env ty_arg in
+          type_pattern ~lev env pc_lhs scope ty_arg
+        in
+        pattern_force := force @ !pattern_force;
+        let pat =
+          if !Clflags.principal then begin
+            end_def ();
+            iter_pattern (fun {pat_type=t} -> generalize_structure t) pat;
+            { pat with pat_type = instance env pat.pat_type }
+          end else pat
+        in
+        (pat, (ext_env, unpacks)))
+      caselist in
+  (* Unify cases (delayed to keep it order-free) *)
+  let patl = List.map fst pat_env_list in
+  List.iter (fun pat -> unify_pat env pat ty_arg') patl;
+  (* Check for polymorphic variants to close *)
+  if List.exists has_variants patl then begin
+    Parmatch.pressure_variants env patl;
+    List.iter (iter_pattern finalize_variant) patl
+  end;
+  (* `Contaminating' unifications start here *)
+  List.iter (fun f -> f()) !pattern_force;
+  (* Post-processing and generalization *)
+  List.iter (iter_pattern (fun {pat_type=t} -> unify_var env t (newvar())))
+    patl;
+  List.iter (fun pat -> unify_pat env pat (instance env ty_arg)) patl;
+  end_def ();
+  List.iter (iter_pattern (fun {pat_type=t} -> generalize t)) patl;
+  (* type bodies *)
+  let in_function = if List.length caselist = 1 then in_function else None in
+  let cases =
+    List.map2
+      (fun (pat, (ext_env, unpacks)) {pc_lhs; pc_guard; pc_rhs} ->
+        let sexp = wrap_unpacks pc_rhs unpacks in
+        let ty_res' =
+          if !Clflags.principal then begin
+            begin_def ();
+            let ty = instance ~partial:true env ty_res in
+            end_def ();
+            generalize_structure ty; ty
+          end
+          else if contains_gadt env pc_lhs then correct_levels ty_res
+          else ty_res in
+(*        Format.printf "@[%i %i, ty_res' =@ %a@]@." lev (get_current_level())
+          Printtyp.raw_type_expr ty_res'; *)
+        let guard =
+          match pc_guard with
+          | None -> None
+          | Some scond ->
+              Some
+                (type_expect ext_env (wrap_unpacks scond unpacks)
+                   Predef.type_bool)
+        in
+        let exp = type_expect ?in_function ext_env sexp ty_res' in
+        {
+         c_lhs = pat;
+         c_guard = guard;
+         c_rhs = {exp with exp_type = instance env ty_res'}
+        }
+      )
+      pat_env_list caselist
+  in
+  if !Clflags.principal || has_gadts then begin
+    let ty_res' = instance env ty_res in
+    List.iter (fun c -> unify_exp env c.c_rhs ty_res') cases
+  end;
+  let partial =
+    if partial_flag then
+      Parmatch.check_partial_gadt (partial_pred ~lev env ty_arg) loc cases
+    else
+      Partial
+  in
+  add_delayed_check
+    (fun () ->
+      List.iter (fun (pat, (env, _)) -> check_absent_variant env pat)
+        pat_env_list;
+      Parmatch.check_unused env cases);
+  if has_gadts then begin
+    end_def ();
+    (* Ensure that existential types do not escape *)
+    unify_exp_types loc env (instance env ty_res) (newvar ()) ;
+  end;
+  cases, partial
+
+
+
+and type_cases_easy ?in_function env ty_arg ty_res partial_flag loc caselist =
   (* ty_arg is _fully_ generalized *)
   let patterns = List.map (fun {pc_lhs=p} -> p) caselist in
   let erase_either =
